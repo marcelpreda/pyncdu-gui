@@ -445,12 +445,14 @@ class Window (tk.Frame):
         f_path = self.selected_item
         win = tk.Toplevel()
         win.wm_title("File Info - {}".format(f_path))
-        info_list =["{}", "Size: {} B", "Modfied: {}"]
+        info_list =["{}", "Size: {} B", "Modfied: {}", "Owner: {}"]
         label_str = "\n\t".join(info_list)
         
         size = os.path.getsize(f_path)
-        m_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(f_path)))        
-        label_str = label_str.format(f_path, size, m_time)        
+        m_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(f_path)))
+        owner = Path(f_path).owner()
+
+        label_str = label_str.format(f_path, size, m_time, owner)        
         f_info_label = tk.Label(win, anchor="center", justify="left", text=label_str, bg="white", padx=10, pady=10)        
         f_info_label.grid(row=1, column=1, padx=10, pady=10)
         # Button for closing
