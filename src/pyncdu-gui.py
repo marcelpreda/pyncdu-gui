@@ -446,15 +446,19 @@ class Window (tk.Frame):
         win = tk.Toplevel()
         win.wm_title("File Info - {}".format(f_path))
         info_list =["{}", "Size: {} B", "Modfied: {}", "Owner: {}"]
-        label_str = "\n\t".join(info_list)
+        info_str = "\n\t".join(info_list)
         
         size = os.path.getsize(f_path)
         m_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(f_path)))
         owner = Path(f_path).owner()
 
-        label_str = label_str.format(f_path, size, m_time, owner)        
-        f_info_label = tk.Label(win, anchor="center", justify="left", text=label_str, bg="white", padx=10, pady=10)        
-        f_info_label.grid(row=1, column=1, padx=10, pady=10)
+        info_str = info_str.format(f_path, size, m_time, owner)        
+        f_info_text = tk.Text(win, bg="white")
+        f_info_text.insert(1.0, info_str)
+        f_info_text["state"] = "disabled"        
+        f_info_text.configure(height=len(info_str.split("\n")))
+        f_info_text.grid(row=1, column=1, padx=10, pady=10)
+        
         # Button for closing
         close_button = tk.Button(win, text="Close", command=win.destroy)
         close_button.grid(row=3, column=1, padx=10, pady=10)
