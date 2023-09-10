@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
+from cgitb import text
+from genericpath import isdir, isfile
 import json
+from logging import config
 import pprint
 import os
+import subprocess
 #import sys
 import psutil
 from pathlib import Path
@@ -16,7 +20,10 @@ import tkinter.ttk as ttk
 import time
 import logging
 import argparse
+import sys
+import tempfile
 
+import configparser
 
 
 
@@ -33,7 +40,11 @@ class IOutil:
         group.add_argument("-s", "--scan", metavar="/path/to/folder", 
                 help = "Folder to be scanned by ncdu command")        
         group.add_argument("-l", "--load", metavar="/path/to/file.json",
-                help = "File generated previously with 'ncdu -o ...' command")
+                help = "File generated previously with 'ncdu -x -e -o ...' command")
+        parser.add_argument("-c", "--config", metavar="cfg.ini", required=False,
+                help= "Path to config.ini file where we keep the externall command templates.\n" +
+                        "If not provided the default one is used, same path with {}".format(
+                                sys.argv[0]))
         parser.add_argument("-x", "--exclude", metavar="pattern", required=False,
                 help = "Exclude files/folders matching 'pattern'. check ncdu documentation.\n" +
                         "Should be used only with '-s', if '-s' not provided '-x' is ignored.")
@@ -276,19 +287,62 @@ class FileUtils:
         logger.info("Time spent {} (hh:mm:ss) ".format(
                 dt.timedelta(seconds = round(count2 - count1))))
         return root_file
+    
+    @classmethod
+    def parseConfigFile(cls, cfg_file) -> configparser.ConfigParser    :
+        """
+        Parse the config file and return it as dict.
+        see https://docs.python.org/3.6/library/configparser.html#module-configparser
+        Known sections from config file: FILE_MENU
+        @param: cfg_file
+        @return: ConfigParser
+        """
+        cfg = configparser.ConfigParser()
+        cfg.optionxform=str
+        cfg.read(cfg_file)
+        return cfg
+
+    @classmethod
+    def ncdu_scan_folder(cls, folder_path : str, exclude_files: str, out_file: str) -> bool:
+        """
+        Scan the folder_path with ncdu command, exclude the exclude_files 
+        and save the results to out_file
+        @param: folder_path - folder to be scanned
+        @param: exclude_files - filenames to be excluded
+        @param: out_file - where to save the ncdu output , it is a json file
+        @return: True ( on success), False (if somethinmg went wrong)
+        """
+        if os.path.isdir(folder_path) == False:
+            logger.error("{} is not a dir, or it is not readable".format(folder_path))
+            return False
+        cmd = ['ncdu', '-e', '-x', '-o', out_file]
+        if exclude_files:
+            cmd.append('--exclude')
+            cmd.append(exclude_files)
+        cmd.append(folder_path)
+        proc = subprocess.run(cmd, capture_output=True)
+        print("return code = {}, cmd = {}".format(proc.returncode, proc))
+        if proc.returncode == 0:
+            return True
+        else:
+            logger.error("Command {} , exit code = {}, ERROR: {}".format(
+                    proc.args, proc.returncode, proc.stderr))
+            return False
+
 
 
 
 class Window (tk.Frame):
-    def __init__(self, master : tk.Tk, root_file: FileInfo ):
+    def __init__(self, master : tk.Tk, root_file: FileInfo , cfg_data: configparser.ConfigParser):
         
         self.const_multiplier = 1.0/1024/1024 # to transform file size in MB        
 
         self.master = master       
-        self.create_widgets(root_file)
+        self.create_widgets(root_file, cfg_data)
+        master.wm_title(root_file.path)
         
 
-    def create_widgets(self, root_file: FileInfo) -> None:
+    def create_widgets(self, root_file: FileInfo, cfg_data:configparser.ConfigParser) -> None:
         self.master.columnconfigure(0, weight=1)
         self.master.columnconfigure(1, weight=1000)
         self.master.columnconfigure(2, weight=1)
@@ -319,7 +373,7 @@ class Window (tk.Frame):
         self.tree.configure(yscrollcommand=v_scrollbar.set)
         for c in columns:
             self.tree.column(c, anchor=tk.E)
-        self.add_popup_menu_on_tree_view()
+        self.add_popup_menu_on_tree_view(cfg_data)
         
         self.root_file.set_selected_owner("*")        
         if self.root_file.name is None:
@@ -341,8 +395,7 @@ class Window (tk.Frame):
         for c in self.tree.get_children():
             self.tree.delete(c)
         self.populate_data(rf, "")
-        
-
+     
         
         
  
@@ -357,25 +410,63 @@ class Window (tk.Frame):
         for c in file_node.children:
             self.populate_data(c, file_node.path)
 
-    def add_popup_menu_on_tree_view(self):
-        self.popup_menu = tk.Menu(self.tree, tearoff=0)        
-        self.popup_menu.add_command(label="Open Shell", command = self.open_shell)
+    def exec_shell(self, cmd: str):            
+        path = str(Path(self.selected_item))
+        if os.path.isdir(path):
+            dir_path = path
+        else:
+            dir_path = os.path.dirname(path)
+        cmd = cmd.replace('$DIR', dir_path)
+        cmd = cmd.replace('$FILE', path)
+        print("CMD: {}".format(cmd))
+
+        os.system(cmd)
+
+
+    def add_popup_menu_on_tree_view(self, cfg_data: configparser.ConfigParser) -> None:
+        self.popup_menu = tk.Menu(self.tree, tearoff=0)
         self.popup_menu.add_command(label="File Info", command = self.show_file_info)
+        for option, cmd in cfg_data.items("FILE_MENU"):
+            my_pp.pprint(option)
+            my_pp.pprint(cmd)
+            # dinamically define commands
+            def item_cmd(cmd):
+                def new_cmd():
+                    self.exec_shell(cmd)
+                return new_cmd
+            i_cmd = item_cmd(cmd)
+            self.popup_menu.add_command(label=option , command = i_cmd)
+
         self.tree.bind("<Button-3>", self.do_popup)
 
-    def open_shell(self):
-        dir_path = self.selected_item
-        if os.path.isfile(self.selected_item):
-            path = Path(self.selected_item)
-            dir_path = path.parent.absolute()
-        cmd = "gnome-terminal --working-directory={0} || xterm -e 'cd {0} && /bin/tcsh' & ".format(dir_path)
-        os.system(cmd)
+    
     
     def show_file_info(self):
-        logger.info("File Info {}".format(self.selected_item))
+        f_path = self.selected_item
+        win = tk.Toplevel()
+        win.wm_title("File Info - {}".format(f_path))
+        info_list =["{}", "Size: {} B", "Modfied: {}"]
+        label_str = "\n\t".join(info_list)
+        
+        size = os.path.getsize(f_path)
+        m_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(f_path)))        
+        label_str = label_str.format(f_path, size, m_time)        
+        f_info_label = tk.Label(win, anchor="center", justify="left", text=label_str, bg="white", padx=10, pady=10)        
+        f_info_label.grid(row=1, column=1, padx=10, pady=10)
+        # Button for closing
+        close_button = tk.Button(win, text="Close", command=win.destroy)
+        close_button.grid(row=3, column=1, padx=10, pady=10)
+        
+        win.columnconfigure(0, weight=3)
+        win.columnconfigure(1, weight=10)
+        win.columnconfigure(2, weight=3)
+        win.rowconfigure(0, weight=1)
+        win.rowconfigure(1, weight=10)
+        win.rowconfigure(2, weight=1)
+
 
     def do_popup(self, event):
-    # display the popup menu for tree vie
+    # display the popup menu for tree view
         try:
             self.selected_item = self.tree.identify_row(event.y)            
             self.popup_menu.tk_popup(event.x_root, event.y_root)
@@ -396,16 +487,44 @@ if __name__  == "__main__":
 
     root_file = FileInfo("")
 
-    if args.load:        
-        root_file = FileUtils.load_json_data(args.load)
-        process = psutil.Process(os.getpid())
-        logger.info("Used memory {:.3f} GB".format(process.memory_info().rss/1024/1024/1024))
+
+# load the config data file
+    if args.config:
+        cfg_file = args.config
+    else:
+        cfg_file = os.path.join( os.path.dirname(os.path.abspath(__file__)), 'cfg.ini')
+
+    if os.path.isfile(cfg_file):
+        cfg_data = FileUtils.parseConfigFile(cfg_file)
+    else:
+        cfg_data = configparser.ConfigParser()
+
+    my_pp.pprint(cfg_data)
+
+
+    if args.load:      
+       ncdu_data_file = args.load
+
+    if args.scan:
+        fp, ncdu_data_file = tempfile.mkstemp( 
+                dir = tempfile.gettempdir(), prefix="ncdu_", suffix = ".json")        
+        os.close(fp)
+             
+        logger.info("Start scanning folder {} ...".format(args.scan))
+        if FileUtils.ncdu_scan_folder(args.scan, args.exclude, ncdu_data_file):
+            logger.info("End scanning. Results saved to {}.".format(ncdu_data_file))
+        else:
+            sys.exit(11)
+
+    root_file = FileUtils.load_json_data(ncdu_data_file)
+    
+    process = psutil.Process(os.getpid())
+    logger.info("Used memory {:.3f} GB".format(process.memory_info().rss/1024/1024/1024))
     
        
 
     top_tk = tk.Tk()
-    window = Window(top_tk, root_file)
+    window = Window(top_tk, root_file, cfg_data)
     top_tk.mainloop()
     logger.info("Exiting ...{}".format(datetime.now()))
     logging.shutdown()
-
