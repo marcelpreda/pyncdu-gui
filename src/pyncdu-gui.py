@@ -24,6 +24,7 @@ import sys
 import tempfile
 
 import configparser
+import logging, logging.config
 
 
 
@@ -36,11 +37,12 @@ class IOutil:
                     description = 'Wrapper over ncdu command, browse the folders reported by ncdu',
                     epilog = 'marcel_preda@yahoo.com', 
                     formatter_class = argparse.RawTextHelpFormatter)
-        group = parser.add_mutually_exclusive_group(required=False)
+        group = parser.add_mutually_exclusive_group(required=True)
         group.add_argument("-s", "--scan", metavar="/path/to/folder", 
                 help = "Folder to be scanned by ncdu command")        
         group.add_argument("-l", "--load", metavar="/path/to/file.json",
                 help = "File generated previously with 'ncdu -x -e -o ...' command")
+        
         parser.add_argument("-c", "--config", metavar="cfg.ini", required=False,
                 help= "Path to config.ini file where we keep the externall command templates.\n" +
                         "If not provided the default one is used, same path with {}".format(
@@ -48,7 +50,8 @@ class IOutil:
         parser.add_argument("-x", "--exclude", metavar="pattern", required=False,
                 help = "Exclude files/folders matching 'pattern'. check ncdu documentation.\n" +
                         "Should be used only with '-s', if '-s' not provided '-x' is ignored.")
-        
+        parser.add_argument("-v", "--verbose", required=False, action="store_true",
+                help="Increase verbosity level")
         args = parser.parse_args()
         return args
     
@@ -88,8 +91,7 @@ class FileInfo:
         self.asize = kwargs.get("asize", 0)
         # if symlink it has no dsize, so use asize        
         self.dsize = kwargs.get("dsize", self.asize)
-        self.path = os.path.join(parent, kwargs["name"])
-        #my_pp.pprint(kwargs)
+        self.path = os.path.join(parent, kwargs["name"])        
         self.uid = kwargs["uid"]      
         # when look for owner we may ger exxcption like file was deleted 
         # or it is a symlink to a file where we have no access
@@ -105,7 +107,7 @@ class FileInfo:
         cls.files_counter += 1
         if (cls.files_counter % cls.percent_batch_size) == 0:
             percentage = cls.files_counter*100/cls.files_number
-            logger.info("{:-7d}/{} ({:-6.2f}%) {}".format(
+            logger.debug("{:-7d}/{} ({:-6.2f}%) {}".format(
                     cls.files_counter, cls.files_number, percentage, datetime.now()))
 
     @classmethod
@@ -188,12 +190,11 @@ class FileInfo:
         self.children.sort(reverse=True)
         # print info messages only on top, not on every recursive call
         if hier_level == 0:
-            logger.info("Start to calculate hierarchy size ... {} for user {}".format(
-                datetime.now(), self.get_selected_owner()))        
+            logger.info("Calculating hierarchy size for user {}...".format(self.get_selected_owner()))        
         for c in self.children:
             c.sort_children_by_size_group_by_selected_owner(hier_level+1)
         if hier_level == 0:
-            logger.info("End to calculate hierarchy size ... {}".format(datetime.now()))
+            logger.info("End calculating hierarchy size.")
 
     def set_selected_owner(self, owner: str):
         self.__class__.selected_owner = owner
@@ -215,6 +216,12 @@ class FileUtils:
     # cahe here uid -> username, to not make many calls to system 
     # calling pwd.getpwuid(uid) means also IO operations => they are slow
     cache_dict_uid_to_username = {}
+    logger : logging.Logger = None
+
+    @classmethod
+    def set_logger(cls, logger: logging.Logger) -> None:
+        cls.logger  = logger
+        
 
     @classmethod
     def get_file_lines_number(cls, filename):
@@ -267,25 +274,21 @@ class FileUtils:
             ncdu_data_file - path to the json file
         Return: a FileInfo object
         """
+        count1 = time.perf_counter()
         ncdu_data = []
         lines_number = FileUtils.get_file_lines_number(ncdu_data_file)
-        logger.setLevel(logging.INFO)
-        logger.info("Loading data from {} ... {}".format(ncdu_data_file, datetime.now()))
+        logger.info("Loading data from {} ... ".format(ncdu_data_file))
             
         with open(ncdu_data_file, "r", errors='ignore') as fh:
-            ncdu_data = json.load(fh)
-        logger.info("File read. Building internal data structure ... {}".format(datetime.now()))
+            ncdu_data = json.load(fh)        
         # first 3 elements has no importance for us
         files_data = ncdu_data[3]
         FileInfo.set_percent_batch_size(lines_number)
         root_file = FileInfo("", **files_data[0])
         root_file.add_children(files_data[1:])
-        logger.info("Internal data structure created. {}".format(datetime.now()))
-
+        logger.info("Data loaded.")
         count2 = time.perf_counter()
-
-        logger.info("Time spent {} (hh:mm:ss) ".format(
-                dt.timedelta(seconds = round(count2 - count1))))
+        logger.debug("Time spent on loading data {}".format(dt.timedelta(seconds = round(count2 - count1))))
         return root_file
     
     @classmethod
@@ -320,8 +323,7 @@ class FileUtils:
             cmd.append('--exclude')
             cmd.append(exclude_files)
         cmd.append(folder_path)
-        proc = subprocess.run(cmd, capture_output=True)
-        print("return code = {}, cmd = {}".format(proc.returncode, proc))
+        proc = subprocess.run(cmd, capture_output=False)        
         if proc.returncode == 0:
             return True
         else:
@@ -333,14 +335,18 @@ class FileUtils:
 
 
 class Window (tk.Frame):
-    def __init__(self, master : tk.Tk, root_file: FileInfo , cfg_data: configparser.ConfigParser):
+    def __init__(self, master : tk.Tk, root_file: FileInfo , cfg_data: configparser.ConfigParser,
+                 logger : logging.Logger):
         
         self.const_multiplier = 1.0/1024/1024 # to transform file size in MB        
 
         self.master = master       
         self.create_widgets(root_file, cfg_data)
+        self.logger = logger
         master.wm_title(root_file.path)
-        
+        self.logger.debug("Used memory {:.2f} GB".format(
+                psutil.Process(os.getpid()).memory_info().rss/1024/1024/1024)) 
+        pass
 
     def create_widgets(self, root_file: FileInfo, cfg_data:configparser.ConfigParser) -> None:
         self.master.columnconfigure(0, weight=1)
@@ -366,7 +372,7 @@ class Window (tk.Frame):
  
         self.tree.heading('#0', text='Path')
         self.tree.heading('size', text="Size(MB)")
-        self.tree.heading('per_user', text='Owned by user')
+        self.tree.heading('per_user', text='Owned by *')
         # create scroll bar on treeview
         v_scrollbar = ttk.Scrollbar(self.master, command=self.tree.yview, orient='vertical')
         v_scrollbar.grid(row=1, column=2, sticky='ns')
@@ -379,8 +385,7 @@ class Window (tk.Frame):
         if self.root_file.name is None:
             return
         self.root_file.sort_children_by_size_group_by_selected_owner(0)
-        self.populate_data(self.root_file, "")
-        
+        self.populate_data(self.root_file, "")        
         self.selected_item = None
 
     def onOwnerChange(self, event: tk.Event):
@@ -395,8 +400,8 @@ class Window (tk.Frame):
         for c in self.tree.get_children():
             self.tree.delete(c)
         self.populate_data(rf, "")
+        self.tree.heading('per_user', text='Owned by {}'.format(event.widget.get()))        
      
-        
         
  
     def populate_data(self, file_node : FileInfo, parent_name : str):
@@ -418,8 +423,7 @@ class Window (tk.Frame):
             dir_path = os.path.dirname(path)
         cmd = cmd.replace('$DIR', dir_path)
         cmd = cmd.replace('$FILE', path)
-        print("CMD: {}".format(cmd))
-
+        self.logger.debug("Execute command '{}'".format(cmd))
         os.system(cmd)
 
 
@@ -427,8 +431,6 @@ class Window (tk.Frame):
         self.popup_menu = tk.Menu(self.tree, tearoff=0)
         self.popup_menu.add_command(label="File Info", command = self.show_file_info)
         for option, cmd in cfg_data.items("FILE_MENU"):
-            my_pp.pprint(option)
-            my_pp.pprint(cmd)
             # dinamically define commands
             def item_cmd(cmd):
                 def new_cmd():
@@ -483,18 +485,25 @@ class Window (tk.Frame):
 
 
 if __name__  == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger("PY-NCDU GUI")
-    args = IOutil.readArgs()
 
-    count1 = time.perf_counter()
+    args = IOutil.readArgs()    
+    logging.config.fileConfig(os.path.join( os.path.dirname(os.path.abspath(__file__)), 'log.ini'))
+    logger = logging.getLogger('PYNCDU')
+    
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+    
+    FileUtils.set_logger(logger)
+    
+
+
     # for debugg printing
     my_pp = pprint.PrettyPrinter()
 
     root_file = FileInfo("")
 
 
-# load the config data file
+    # load the config data file
     if args.config:
         cfg_file = args.config
     else:
@@ -505,7 +514,6 @@ if __name__  == "__main__":
     else:
         cfg_data = configparser.ConfigParser()
 
-    my_pp.pprint(cfg_data)
 
 
     if args.load:      
@@ -515,22 +523,18 @@ if __name__  == "__main__":
         fp, ncdu_data_file = tempfile.mkstemp( 
                 dir = tempfile.gettempdir(), prefix="ncdu_", suffix = ".json")        
         os.close(fp)
-             
-        logger.info("Start scanning folder {} ...".format(args.scan))
-        if FileUtils.ncdu_scan_folder(args.scan, args.exclude, ncdu_data_file):
-            logger.info("End scanning. Results saved to {}.".format(ncdu_data_file))
-        else:
+        logger.info("Scanning folder {} (exclude {}) ...".format(args.scan, args.exclude))
+        if FileUtils.ncdu_scan_folder(args.scan, args.exclude, ncdu_data_file) == False:
             sys.exit(11)
+        logger.info("End scanning {}".format(args.scan))
 
-    root_file = FileUtils.load_json_data(ncdu_data_file)
     
-    process = psutil.Process(os.getpid())
-    logger.info("Used memory {:.3f} GB".format(process.memory_info().rss/1024/1024/1024))
+    root_file = FileUtils.load_json_data(ncdu_data_file)   
     
        
 
     top_tk = tk.Tk()
-    window = Window(top_tk, root_file, cfg_data)
+    window = Window(top_tk, root_file, cfg_data, logger)
     top_tk.mainloop()
-    logger.info("Exiting ...{}".format(datetime.now()))
+    
     logging.shutdown()
